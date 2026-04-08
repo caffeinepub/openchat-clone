@@ -261,6 +261,12 @@ export interface UserProfile {
     profileImageUrl?: string;
 }
 export interface backendInterface {
+    /**
+     * / Called by the frontend StorageClient before every upload.
+     * / Stores the file hash in certified data; the IC attaches the certificate
+     * / to the update-call response so the storage gateway can verify it.
+     */
+    _immutableObjectStorageCreateCertificate(hashWithPrefix: string): Promise<void>;
     addCatalogReaction(roomId: RoomId, messageId: MessageId, emoji: string): Promise<void>;
     addFeedReaction(postId: PostId, emoji: string): Promise<void>;
     addReaction(messageId: MessageId, emoji: string): Promise<void>;
@@ -327,6 +333,20 @@ export interface backendInterface {
 import type { AudioContent as _AudioContent, CatalogMessage as _CatalogMessage, CatalogRoom as _CatalogRoom, ConversationId as _ConversationId, ConversationKind as _ConversationKind, ConversationSummary as _ConversationSummary, EditEntry as _EditEntry, FeedPage as _FeedPage, ImageContent as _ImageContent, LinkContent as _LinkContent, Message as _Message, MessageContent as _MessageContent, MessageId as _MessageId, MessagePage as _MessagePage, PinnedMessage as _PinnedMessage, Post as _Post, PostId as _PostId, RoomId as _RoomId, SendCatalogMediaInput as _SendCatalogMediaInput, SendFeedMediaInput as _SendFeedMediaInput, SendMessageInput as _SendMessageInput, Timestamp as _Timestamp, UpdateProfileRequest as _UpdateProfileRequest, UpdateProfileResult as _UpdateProfileResult, UserId as _UserId, UserProfile as _UserProfile, VideoContent as _VideoContent } from "./declarations/backend.did.d.ts";
 export class Backend implements backendInterface {
     constructor(private actor: ActorSubclass<_SERVICE>, private _uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, private _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, private processError?: (error: unknown) => never){}
+    async _immutableObjectStorageCreateCertificate(arg0: string): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor._immutableObjectStorageCreateCertificate(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor._immutableObjectStorageCreateCertificate(arg0);
+            return result;
+        }
+    }
     async addCatalogReaction(arg0: RoomId, arg1: MessageId, arg2: string): Promise<void> {
         if (this.processError) {
             try {

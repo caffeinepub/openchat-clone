@@ -162,6 +162,7 @@ export const UpdateProfileResult = IDL.Variant({
 });
 
 export const idlService = IDL.Service({
+  '_immutableObjectStorageCreateCertificate' : IDL.Func([IDL.Text], [], []),
   'addCatalogReaction' : IDL.Func([RoomId, MessageId, IDL.Text], [], []),
   'addFeedReaction' : IDL.Func([PostId, IDL.Text], [], []),
   'addReaction' : IDL.Func([MessageId, IDL.Text], [], []),
@@ -424,6 +425,7 @@ export const idlFactory = ({ IDL }) => {
   });
   
   return IDL.Service({
+    '_immutableObjectStorageCreateCertificate' : IDL.Func([IDL.Text], [], []),
     'addCatalogReaction' : IDL.Func([RoomId, MessageId, IDL.Text], [], []),
     'addFeedReaction' : IDL.Func([PostId, IDL.Text], [], []),
     'addReaction' : IDL.Func([MessageId, IDL.Text], [], []),

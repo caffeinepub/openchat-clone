@@ -180,6 +180,10 @@ type AudioContent =
    url: text;
  };
 service : {
+  /// Called by the frontend StorageClient before every upload.
+  /// Stores the file hash in certified data; the IC attaches the certificate
+  /// to the update-call response so the storage gateway can verify it.
+  _immutableObjectStorageCreateCertificate: (hashWithPrefix: text) -> ();
   addCatalogReaction: (roomId: RoomId, messageId: MessageId, emoji: text) ->
    ();
   addFeedReaction: (postId: PostId, emoji: text) -> ();

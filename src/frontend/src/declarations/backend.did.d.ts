@@ -154,6 +154,12 @@ export interface VideoContent {
   'fileSize' : bigint,
 }
 export interface _SERVICE {
+  /**
+   * / Called by the frontend StorageClient before every upload.
+   * / Stores the file hash in certified data; the IC attaches the certificate
+   * / to the update-call response so the storage gateway can verify it.
+   */
+  '_immutableObjectStorageCreateCertificate' : ActorMethod<[string], undefined>,
   'addCatalogReaction' : ActorMethod<[RoomId, MessageId, string], undefined>,
   'addFeedReaction' : ActorMethod<[PostId, string], undefined>,
   'addReaction' : ActorMethod<[MessageId, string], undefined>,
