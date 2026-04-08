@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenChat</title>
+    <meta name="description" content="Decentralized messaging on the Internet Computer" />
+    <meta property="og:title" content="OpenChat" />
+    <meta property="og:description" content="Decentralized messaging on the Internet Computer" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#0a0a14" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <!-- Apply theme before first render to avoid flash -->
+    <script>
+      (function () {
+        var stored = localStorage.getItem("openchat-theme");
+        var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        var theme = stored === "dark" || stored === "light" ? stored : (prefersDark ? "dark" : "light");
+        document.documentElement.classList.add(theme);
+        if (theme === "light") {
+          document.querySelector('meta[name="theme-color"]').setAttribute("content", "#f5f5f5");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./src/main.tsx"></script>
+  </body>
+</html>

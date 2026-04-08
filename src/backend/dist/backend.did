@@ -1,0 +1,255 @@
+type VideoContent = 
+ record {
+   duration: opt nat;
+   fileSize: nat;
+   mimeType: text;
+   thumbnailUrl: opt text;
+   url: text;
+ };
+type UserProfile = 
+ record {
+   bio: opt text;
+   displayName: text;
+   id: UserId;
+   lastHandleChange: opt int;
+   profileImageUrl: opt text;
+   registeredAt: Timestamp;
+   usernameHandle: opt text;
+ };
+type UserId = principal;
+type UpdateProfileResult = 
+ variant {
+   err: text;
+   ok: UserProfile;
+ };
+type UpdateProfileRequest = 
+ record {
+   bio: opt text;
+   displayName: opt text;
+   profileImageUrl: opt text;
+   usernameHandle: opt text;
+ };
+type Timestamp = int;
+type SendMessageInput = 
+ record {
+   content: MessageContent;
+   conversationId: nat;
+ };
+type SendFeedMediaInput = 
+ record {
+   content: MessageContent;
+   parentPostId: opt PostId;
+ };
+type SendCatalogMediaInput = 
+ record {
+   content: MessageContent;
+   roomId: RoomId;
+ };
+type SearchResult = 
+ record {
+   conversationId: ConversationId;
+   messageId: MessageId;
+   sender: UserId;
+   sentAt: Timestamp;
+   snippet: text;
+ };
+type RoomId = nat;
+type ReactionGroup = 
+ record {
+   count: nat;
+   emoji: text;
+   userIds: vec UserId;
+ };
+type PostId = nat;
+type Post = 
+ record {
+   author: UserId;
+   content: MessageContent;
+   id: PostId;
+   likedBy: vec UserId;
+   parentPostId: opt PostId;
+   pinned: bool;
+   reactions: vec record {
+                    text;
+                    vec UserId;
+                  };
+   timestamp: Timestamp;
+ };
+type PinnedMessage = 
+ record {
+   conversationId: ConversationId;
+   message: Message;
+   messageId: MessageId;
+   pinnedAt: Timestamp;
+   pinnedBy: UserId;
+ };
+type MessagePage = 
+ record {
+   messages: vec Message;
+   nextCursor: opt MessageId;
+ };
+type MessageId = nat;
+type MessageContent = 
+ variant {
+   audio: AudioContent;
+   deleted;
+   image: ImageContent;
+   link: LinkContent;
+   "text": text;
+   video: VideoContent;
+ };
+type Message = 
+ record {
+   content: MessageContent;
+   conversationId: ConversationId;
+   id: MessageId;
+   sender: UserId;
+   sentAt: Timestamp;
+ };
+type LinkContent = 
+ record {
+   description: opt text;
+   imageUrl: opt text;
+   title: opt text;
+   url: text;
+ };
+type ImageContent = 
+ record {
+   fileSize: nat;
+   height: opt nat;
+   mimeType: text;
+   url: text;
+   width: opt nat;
+ };
+type FeedPage = 
+ record {
+   posts: vec Post;
+   total: nat;
+ };
+type EditEntry = 
+ record {
+   editedAt: Timestamp;
+   previousContent: MessageContent;
+ };
+type ConversationSummary = 
+ record {
+   id: ConversationId;
+   kind: ConversationKind;
+   lastMessageAt: opt Timestamp;
+   members: vec UserId;
+   unreadCount: nat;
+ };
+type ConversationKind = 
+ variant {
+   direct;
+   group: record {name: text;};
+ };
+type ConversationId = nat;
+type CatalogRoom = 
+ record {
+   coverImageUrl: opt text;
+   createdAt: Timestamp;
+   creator: UserId;
+   description: text;
+   id: RoomId;
+   lastActivityAt: Timestamp;
+   members: vec UserId;
+   messageCount: nat;
+   title: text;
+ };
+type CatalogMessage = 
+ record {
+   author: UserId;
+   content: MessageContent;
+   createdAt: Timestamp;
+   deleted: bool;
+   editedAt: opt Timestamp;
+   id: MessageId;
+   pinned: bool;
+   reactions: vec record {
+                    text;
+                    vec UserId;
+                  };
+   roomId: RoomId;
+ };
+type AudioContent = 
+ record {
+   duration: opt nat;
+   fileSize: nat;
+   mimeType: text;
+   url: text;
+ };
+service : {
+  addCatalogReaction: (roomId: RoomId, messageId: MessageId, emoji: text) ->
+   ();
+  addFeedReaction: (postId: PostId, emoji: text) -> ();
+  addReaction: (messageId: MessageId, emoji: text) -> ();
+  addReply: (postId: PostId, input: SendFeedMediaInput) -> (Post);
+  createCatalogRoom: (title: text, description: text, coverImageUrl:
+   opt text) -> (CatalogRoom);
+  createDirectConversation: (otherUserId: UserId) -> (ConversationSummary);
+  createGroupConversation: (name: text, memberIds: vec UserId) ->
+   (ConversationSummary);
+  createPost: (input: SendFeedMediaInput) -> (Post);
+  deleteCatalogMessage: (roomId: RoomId, messageId: MessageId) -> ();
+  deleteMessage: (messageId: MessageId) -> (bool);
+  deletePost: (postId: PostId) -> ();
+  editCatalogMessage: (roomId: RoomId, messageId: MessageId, newText:
+   text) -> ();
+  editMessage: (messageId: MessageId, newContent: MessageContent) -> ();
+  getCatalogMessages: (roomId: RoomId, beforeId: opt MessageId) ->
+   (vec CatalogMessage) query;
+  getCatalogRoom: (roomId: RoomId) -> (opt CatalogRoom) query;
+  getCatalogRooms: (search: opt text) -> (vec CatalogRoom) query;
+  getCatalogTypingUsers: (roomId: RoomId) -> (vec UserId) query;
+  getConversation: (conversationId: ConversationId) ->
+   (opt ConversationSummary) query;
+  getEditHistory: (messageId: MessageId) -> (vec EditEntry) query;
+  getFeedPosts: (offset: nat, limit: nat) -> (FeedPage) query;
+  getFeedTypingUsers: (postId: PostId) -> (vec UserId) query;
+  getJoinedCatalogRooms: () -> (vec CatalogRoom) query;
+  getMessages: (conversationId: ConversationId, beforeId: opt MessageId,
+   limit: nat) -> (MessagePage) query;
+  getOrCreateProfile: (displayName: text) -> (UserProfile);
+  getPinnedCatalogMessages: (roomId: RoomId) -> (vec CatalogMessage) query;
+  getPinnedFeedReplies: (postId: PostId) -> (vec Post) query;
+  getPinnedMessages: (conversationId: ConversationId) ->
+   (vec PinnedMessage) query;
+  getPostLikes: (postId: PostId) -> (vec UserId) query;
+  getPostReplies: (postId: PostId) -> (vec Post) query;
+  getProfile: (userId: UserId) -> (opt UserProfile) query;
+  getReactions: (messageId: MessageId) -> (vec ReactionGroup) query;
+  getSharedConversations: (targetUserId: UserId) ->
+   (vec ConversationSummary) query;
+  getTypingUsers: (conversationId: ConversationId) -> (vec UserProfile) query;
+  getUnreadCatalogCount: (roomId: RoomId) -> (nat) query;
+  getUnreadFeedCount: () -> (nat);
+  joinCatalogRoom: (roomId: RoomId) -> ();
+  leaveCatalogRoom: (roomId: RoomId) -> ();
+  likePost: (postId: PostId) -> ();
+  listConversations: () -> (vec ConversationSummary) query;
+  markCatalogRoomRead: (roomId: RoomId) -> ();
+  markConversationRead: (conversationId: ConversationId) -> ();
+  markFeedRead: () -> ();
+  pinCatalogMessage: (roomId: RoomId, messageId: MessageId) -> ();
+  pinFeedReply: (postId: PostId, replyId: PostId) -> ();
+  pinMessage: (messageId: MessageId) -> ();
+  removeCatalogReaction: (roomId: RoomId, messageId: MessageId, emoji:
+   text) -> ();
+  removeFeedReaction: (postId: PostId, emoji: text) -> ();
+  removeReaction: (messageId: MessageId) -> ();
+  removeUserFromCatalogRoom: (roomId: RoomId, userId: principal) -> ();
+  reportCatalogRoom: (roomId: RoomId, reason: text) -> ();
+  searchMessages: (keyword: text) -> (vec SearchResult) query;
+  sendCatalogMediaMessage: (input: SendCatalogMediaInput) -> (CatalogMessage);
+  sendMediaMessage: (input: SendMessageInput) -> (Message);
+  sendMessage: (conversationId: ConversationId, "text": text) -> (Message);
+  setCatalogTyping: (roomId: RoomId) -> ();
+  setFeedTyping: (postId: PostId) -> ();
+  setTyping: (conversationId: ConversationId, isTyping: bool) -> ();
+  unlikePost: (postId: PostId) -> ();
+  unpinCatalogMessage: (roomId: RoomId, messageId: MessageId) -> ();
+  unpinFeedReply: (postId: PostId, replyId: PostId) -> ();
+  unpinMessage: (messageId: MessageId) -> ();
+  updateProfile: (req: UpdateProfileRequest) -> (UpdateProfileResult);
+}

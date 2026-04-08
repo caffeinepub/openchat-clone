@@ -1,0 +1,23 @@
+{
+  "overview": "A modern chat app inspired by Open Chat with direct messages, group chats, a public feed, and a 4chan-style catalog of permanent rooms. Features full multimedia messaging, profile editing, and Internet Identity authentication.",
+  "features": [
+    "Direct and group messaging",
+    "Public feed with post-as-chatroom replies",
+    "4chan-style catalog of permanent rooms",
+    "Profile editing with picture, bio, and username handle",
+    "Image and video uploads via object storage",
+    "Voice and video messages",
+    "Message reactions, pinning, and editing",
+    "Internet Identity authentication"
+  ],
+  "category": "social-communication",
+  "tags": [
+    "chat",
+    "messaging",
+    "social",
+    "catalog",
+    "internet-identity",
+    "multimedia"
+  ],
+  "last_updated": "2026-04-08T04:06:51.449Z"
+}
