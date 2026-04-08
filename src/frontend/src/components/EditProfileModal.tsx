@@ -98,8 +98,17 @@ export default function EditProfileModal({ onClose }: Props) {
         setIsUploadingImage(true);
         try {
           finalImageUrl = await upload(imageFile);
-        } catch {
-          setError("Image upload failed. Please try again.");
+          // Validate persistent URL
+          if (finalImageUrl && !finalImageUrl.startsWith("https://")) {
+            throw new Error(
+              "Upload returned a temporary URL — please try again.",
+            );
+          }
+        } catch (uploadErr) {
+          console.error("[EditProfileModal] Image upload error:", uploadErr);
+          const msg =
+            uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+          setError(`Image upload failed: ${msg}`);
           setIsSaving(false);
           setIsUploadingImage(false);
           return;

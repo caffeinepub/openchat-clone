@@ -371,7 +371,7 @@ export function useSetTyping() {
 
 export function useGetTypingUsers(
   conversationId: ConversationId | null,
-  _currentUserId: UserId | null,
+  currentUserId: UserId | null,
 ) {
   const { getClient, isReady } = useBackendClient();
   return useQuery<UserProfile[]>({
@@ -380,7 +380,9 @@ export function useGetTypingUsers(
       if (!conversationId) return [];
       const client = await getClient();
       const profiles = await client.getTypingUsers(BigInt(conversationId));
-      return profiles.map(adaptUserProfile);
+      return profiles
+        .map(adaptUserProfile)
+        .filter((p) => p.id !== currentUserId);
     },
     enabled: !!conversationId && isReady,
     refetchInterval: 3000,
@@ -763,7 +765,7 @@ export function useSetFeedTyping() {
 
 export function useGetFeedTypingUsers(
   postId: string | null,
-  _currentUserId: string | null,
+  currentUserId: string | null,
 ) {
   const { getClient, isReady } = useBackendClient();
   return useQuery<UserProfile[]>({
@@ -772,15 +774,17 @@ export function useGetFeedTypingUsers(
       if (!postId) return [];
       const client = await getClient();
       const userIds = await client.getFeedTypingUsers(BigInt(postId));
-      // Return minimal profiles from principals
-      return userIds.map((p) => {
-        const id = principalToString(p);
-        return {
-          id,
-          displayName: id.slice(0, 10),
-          avatarInitials: id.slice(0, 2).toUpperCase(),
-        };
-      });
+      // Return minimal profiles from principals, excluding the current user
+      return userIds
+        .map((p) => {
+          const id = principalToString(p);
+          return {
+            id,
+            displayName: id.slice(0, 10),
+            avatarInitials: id.slice(0, 2).toUpperCase(),
+          };
+        })
+        .filter((p) => p.id !== currentUserId);
     },
     enabled: !!postId && isReady,
     refetchInterval: 3000,
@@ -1123,7 +1127,7 @@ export function useSetCatalogTyping() {
 
 export function useGetCatalogTypingUsers(
   roomId: string | null,
-  _currentUserId: string | null,
+  currentUserId: string | null,
 ) {
   const { getClient, isReady } = useBackendClient();
   return useQuery<UserProfile[]>({
@@ -1132,14 +1136,16 @@ export function useGetCatalogTypingUsers(
       if (!roomId) return [];
       const client = await getClient();
       const userIds = await client.getCatalogTypingUsers(BigInt(roomId));
-      return userIds.map((p) => {
-        const id = principalToString(p);
-        return {
-          id,
-          displayName: id.slice(0, 10),
-          avatarInitials: id.slice(0, 2).toUpperCase(),
-        };
-      });
+      return userIds
+        .map((p) => {
+          const id = principalToString(p);
+          return {
+            id,
+            displayName: id.slice(0, 10),
+            avatarInitials: id.slice(0, 2).toUpperCase(),
+          };
+        })
+        .filter((p) => p.id !== currentUserId);
     },
     enabled: !!roomId && isReady,
     refetchInterval: 3000,

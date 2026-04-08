@@ -201,7 +201,14 @@ function CreateRoomModal({ onClose }: { onClose: () => void }) {
       setUploadProgress(0);
       try {
         coverImageUrl = await upload(coverFile, (p) => setUploadProgress(p));
+        // Validate persistent URL
+        if (coverImageUrl && !coverImageUrl.startsWith("https://")) {
+          throw new Error(
+            "Upload returned a temporary URL — please try again.",
+          );
+        }
       } catch (err) {
+        console.error("[CatalogPage] Cover image upload error:", err);
         setIsUploading(false);
         setUploadError(
           err instanceof Error

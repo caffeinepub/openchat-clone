@@ -242,6 +242,11 @@ function ComposeBox() {
         const uploadedUrl = await upload(mediaFile, (p) =>
           setUploadProgress(p),
         );
+        if (!uploadedUrl.startsWith("https://")) {
+          throw new Error(
+            "Upload returned a temporary URL — storage upload failed.",
+          );
+        }
         if (mediaKind === "image") {
           content = {
             kind: "image",
@@ -262,6 +267,7 @@ function ComposeBox() {
           };
         }
       } catch (err) {
+        console.error("[FeedPage] Media upload error:", err);
         setIsUploading(false);
         setUploadError(
           err instanceof Error

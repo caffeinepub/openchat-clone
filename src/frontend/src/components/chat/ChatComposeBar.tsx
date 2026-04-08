@@ -248,11 +248,27 @@ export function ChatComposeBar({
         const permanentUrl = await uploadFile(file, (p) => {
           setPendingMedia((prev) => (prev ? { ...prev, progress: p } : null));
         });
+
+        // Validate that we received a real persistent URL, not a temp blob: URL
+        if (!permanentUrl.startsWith("https://")) {
+          console.error(
+            "[ChatComposeBar] Upload returned a non-persistent URL:",
+            permanentUrl,
+          );
+          throw new Error(
+            "Upload returned a temporary URL — storage upload likely failed.",
+          );
+        }
+
         setPendingMedia((prev) =>
           prev ? { ...prev, progress: 100, uploadedUrl: permanentUrl } : null,
         );
-      } catch {
-        setFileError("Upload failed. Please try again.");
+      } catch (uploadErr) {
+        // Log the FULL error so the 403 details are visible in the browser console
+        console.error("[ChatComposeBar] File upload error:", uploadErr);
+        const message =
+          uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+        setFileError(`Upload failed: ${message}`);
         URL.revokeObjectURL(previewUrl);
         setPendingMedia(null);
       }

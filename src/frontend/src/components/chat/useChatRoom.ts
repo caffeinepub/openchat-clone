@@ -339,6 +339,12 @@ export function useChatRoom({
       kind: "image" | "video" | "audio",
     ): Promise<MessageContentType> => {
       const url = await upload(file);
+      // Validate that the URL is persistent before saving to the backend
+      if (!url.startsWith("https://")) {
+        throw new Error(
+          `Upload returned a temporary URL for ${kind} — storage upload failed.`,
+        );
+      }
       if (kind === "image") {
         return {
           kind: "image",
@@ -456,6 +462,11 @@ export function useChatRoom({
       });
       // Will throw if upload fails — callers should catch and surface error to user
       const url = await upload(file);
+      if (!url.startsWith("https://")) {
+        throw new Error(
+          "Voice upload returned a temporary URL — upload failed.",
+        );
+      }
       const content: MessageContentType = {
         kind: "audio",
         audio: {
@@ -508,6 +519,11 @@ export function useChatRoom({
       });
       // Will throw if upload fails — callers should catch and surface error to user
       const url = await upload(file);
+      if (!url.startsWith("https://")) {
+        throw new Error(
+          "Video upload returned a temporary URL — upload failed.",
+        );
+      }
 
       // Upload thumbnail blob if provided, so the URL persists
       let thumbnailUrl: string | undefined;

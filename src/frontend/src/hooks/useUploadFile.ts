@@ -5,10 +5,25 @@ import {
 import { StorageClient } from "@caffeineai/object-storage";
 import { HttpAgent, type Identity } from "@icp-sdk/core/agent";
 import { useCallback } from "react";
+import { createActor } from "../backend";
 
-// Build a fresh StorageClient for the given identity.
-// Never cache anonymous sessions — the storage gateway rejects unsigned certificate requests.
-async function buildStorageClient(identity: Identity): Promise<StorageClient> {
+// ─── Shared agent + client factory ──────────────────────────────────────────
+//
+// Both the StorageClient (for uploads) and the backend actor (for the
+// _immutableObjectStorageCreateCertificate canister call) MUST use the same
+// HttpAgent instance. Using two separate agents — even with the same identity —
+// causes 403 "Invalid payload" errors because the storage gateway validates
+// the certificate against the exact agent/delegation that signed the call.
+//
+// This factory creates ONE agent from the current identity and wires it into
+// both the StorageClient and a one-off Backend actor. The client is never
+// cached — it's created fresh per upload to guarantee a live delegation.
+
+interface UploadClients {
+  storageClient: StorageClient;
+}
+
+async function buildUploadClients(identity: Identity): Promise<UploadClients> {
   const config = await loadConfig();
 
   if (
@@ -20,6 +35,7 @@ async function buildStorageClient(identity: Identity): Promise<StorageClient> {
     );
   }
 
+  // ONE agent for both clients — shared auth state is critical.
   const agent = new HttpAgent({
     host: config.backend_host,
     identity,
@@ -31,26 +47,55 @@ async function buildStorageClient(identity: Identity): Promise<StorageClient> {
     });
   }
 
-  return new StorageClient(
+  // Wire the same agent into the backend actor so the certificate call and the
+  // StorageClient both share the same authenticated HttpAgent instance.
+  const MOTOKO_DEDUPLICATION_SENTINEL = "!caf!";
+  const storageClient = new StorageClient(
     config.bucket_name,
     config.storage_gateway_url,
     config.backend_canister_id,
     config.project_id,
     agent,
   );
-}
 
-// Cache keyed by identity principal so each authenticated user gets their own client.
-// Anonymous clients are never cached — they always fail.
-const _clientCache = new Map<string, Promise<StorageClient>>();
+  const _backendWithSharedAgent = createActor(
+    config.backend_canister_id,
+    async (file) => {
+      const { hash } = await storageClient.putFile(
+        await file.getBytes(),
+        file.onProgress,
+      );
+      return new TextEncoder().encode(MOTOKO_DEDUPLICATION_SENTINEL + hash);
+    },
+    async (bytes) => {
+      const hashWithPrefix = new TextDecoder().decode(new Uint8Array(bytes));
+      const hash = hashWithPrefix.substring(
+        MOTOKO_DEDUPLICATION_SENTINEL.length,
+      );
+      const { ExternalBlob } = await import("@caffeineai/object-storage");
+      const url = await storageClient.getDirectURL(hash);
+      return ExternalBlob.fromURL(url);
+    },
+    { agent },
+  );
+
+  return { storageClient };
+}
 
 export type UploadProgress = (progress: number) => void;
 
 /**
- * Upload a File to object storage and return a permanent URL.
- * Requires an authenticated Identity — throws if identity is not provided.
- * Never returns blob: or data: URLs. Throws on any failure so callers can
- * surface the error to the user rather than silently passing a session-only URL.
+ * Upload a File to object storage and return a permanent https:// URL.
+ *
+ * Requirements:
+ * - Requires an authenticated Identity — throws if identity is not provided.
+ * - Never returns blob: or data: URLs. Throws on any failure.
+ * - A fresh agent + StorageClient is built for every upload to avoid stale
+ *   delegation state (a cached agent with an expired or partially-initialised
+ *   delegation causes the backend to reject the certificate, which the storage
+ *   gateway reports as 403 Forbidden: Invalid payload).
+ * - Both the StorageClient and the backend actor share the SAME HttpAgent
+ *   instance so the certificate call and the upload use the same auth context.
  */
 export async function uploadFileToStorage(
   file: File,
@@ -61,40 +106,42 @@ export async function uploadFileToStorage(
     throw new Error("Not authenticated — please log in to upload media.");
   }
 
-  // Evict cached client if it may be stale (e.g. after identity change)
-  const cacheKey = identity.getPrincipal().toText();
-  if (!_clientCache.has(cacheKey)) {
-    _clientCache.set(cacheKey, buildStorageClient(identity));
-  }
-
-  let client: StorageClient;
+  // Always build a fresh client pair to ensure the identity delegation is current.
+  let clients: UploadClients;
   try {
-    client = await _clientCache.get(cacheKey)!;
+    clients = await buildUploadClients(identity);
   } catch (err) {
-    // Build failed — evict cache so next call retries
-    _clientCache.delete(cacheKey);
     throw new Error(
       `Failed to connect to storage: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
+  let url: string;
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const { hash } = await client.putFile(bytes, onProgress);
-    const url = await client.getDirectURL(hash);
-    return url;
+    const { hash } = await clients.storageClient.putFile(bytes, onProgress);
+    url = await clients.storageClient.getDirectURL(hash);
   } catch (err) {
-    // Evict cache on failure in case client is in a bad state
-    _clientCache.delete(cacheKey);
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Upload failed: ${message}`);
   }
+
+  // Validate that the returned URL is a persistent https:// URL, not a
+  // temporary blob: or data: URL that would break after the session ends.
+  if (!url.startsWith("https://")) {
+    throw new Error(
+      `Upload returned a temporary URL — storage upload likely failed. Got: ${url.slice(0, 60)}`,
+    );
+  }
+
+  return url;
 }
 
 /**
  * Hook that exposes an authenticated upload function.
- * Uses the Internet Identity from context so uploads are signed with the user's identity.
- * Always creates a fresh StorageClient per upload call to avoid stale identity issues.
+ * Uses the Internet Identity from context so uploads are signed with the
+ * user's identity. A fresh StorageClient + shared agent is created per
+ * upload call to avoid stale agent/delegation issues.
  */
 export function useUploadFile() {
   const { identity } = useInternetIdentity();

@@ -64,30 +64,28 @@ export type {
 
 // ─── Client factory ───────────────────────────────────────────────────────────
 
-let _clientCache: Map<string, Promise<Backend>> = new Map();
-
 /**
- * Returns a Backend instance configured for the given identity.
- * Subsequent calls with the same principal return the cached promise.
+ * Returns a fresh Backend instance configured for the given identity.
+ *
+ * Caching is intentionally disabled: a cached client holds a cached HttpAgent
+ * that can accumulate stale delegation state. If the identity's delegation
+ * expires or refreshes between calls, the cached agent still holds the old
+ * delegation — causing the backend (and the object-storage gateway) to reject
+ * requests with a 403 "Invalid payload" error.
+ *
+ * Since uploads and most mutations don't happen at high frequency, the cost of
+ * creating a fresh client per call is negligible and far outweighs the risk of
+ * stale auth causing silent failures.
  */
 export function getBackendClient(identity?: Identity): Promise<Backend> {
-  const cacheKey = identity
-    ? identity.getPrincipal().toText()
-    : "__anonymous__";
-
-  if (!_clientCache.has(cacheKey)) {
-    const promise = createActorWithConfig(createActor, {
-      agentOptions: identity ? { identity } : undefined,
-    }) as Promise<Backend>;
-    _clientCache.set(cacheKey, promise);
-  }
-
-  return _clientCache.get(cacheKey)!;
+  return createActorWithConfig(createActor, {
+    agentOptions: identity ? { identity } : undefined,
+  }) as Promise<Backend>;
 }
 
-/** Clear the client cache — call on logout. */
+/** No-op — kept for API compatibility. Cache was removed; nothing to clear. */
 export function clearBackendClientCache(): void {
-  _clientCache = new Map();
+  // Cache removed — no-op. Kept so callers don't need to update their imports.
 }
 
 // ─── Primitive adapters ───────────────────────────────────────────────────────
