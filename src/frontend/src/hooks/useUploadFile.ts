@@ -1,147 +1,264 @@
 import {
+  createActorWithConfig,
   loadConfig,
   useInternetIdentity,
 } from "@caffeineai/core-infrastructure";
-import { StorageClient } from "@caffeineai/object-storage";
-import { HttpAgent, type Identity } from "@icp-sdk/core/agent";
+import { ExternalBlob } from "@caffeineai/object-storage";
+import type { Identity } from "@icp-sdk/core/agent";
 import { useCallback } from "react";
 import { createActor } from "../backend";
 
-// ─── Shared agent + client factory ──────────────────────────────────────────
-//
-// Both the StorageClient (for uploads) and the backend actor (for the
-// _immutableObjectStorageCreateCertificate canister call) MUST use the same
-// HttpAgent instance. Using two separate agents — even with the same identity —
-// causes 403 "Invalid payload" errors because the storage gateway validates
-// the certificate against the exact agent/delegation that signed the call.
-//
-// This factory creates ONE agent from the current identity and wires it into
-// both the StorageClient and a one-off Backend actor. The client is never
-// cached — it's created fresh per upload to guarantee a live delegation.
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-interface UploadClients {
-  storageClient: StorageClient;
+const MOTOKO_DEDUPLICATION_SENTINEL = "!caf!";
+const GATEWAY_VERSION = "v1";
+
+// ─── URL construction helper ──────────────────────────────────────────────────
+//
+// Replicates StorageClient.getDirectURL() without needing a StorageClient instance.
+// The URL format is stable and defined by the storage gateway spec.
+
+function buildDirectURL(
+  gatewayUrl: string,
+  hash: string,
+  backendCanisterId: string,
+  projectId: string,
+): string {
+  return (
+    `${gatewayUrl}/${GATEWAY_VERSION}/blob/` +
+    `?blob_hash=${encodeURIComponent(hash)}` +
+    `&owner_id=${encodeURIComponent(backendCanisterId)}` +
+    `&project_id=${encodeURIComponent(projectId)}`
+  );
 }
 
-async function buildUploadClients(identity: Identity): Promise<UploadClients> {
-  const config = await loadConfig();
-
-  if (
-    !config.backend_canister_id ||
-    config.backend_canister_id === "undefined"
-  ) {
-    throw new Error(
-      "Storage not configured — backend canister ID is missing. Please check deployment config.",
-    );
-  }
-
-  // ONE agent for both clients — shared auth state is critical.
-  const agent = new HttpAgent({
-    host: config.backend_host,
-    identity,
-  });
-
-  if (config.backend_host?.includes("localhost")) {
-    await agent.fetchRootKey().catch(() => {
-      // Silently ignore — local replica may not be running during dev
-    });
-  }
-
-  // Wire the same agent into the backend actor so the certificate call and the
-  // StorageClient both share the same authenticated HttpAgent instance.
-  const MOTOKO_DEDUPLICATION_SENTINEL = "!caf!";
-  const storageClient = new StorageClient(
-    config.bucket_name,
-    config.storage_gateway_url,
-    config.backend_canister_id,
-    config.project_id,
-    agent,
-  );
-
-  const _backendWithSharedAgent = createActor(
-    config.backend_canister_id,
-    async (file) => {
-      const { hash } = await storageClient.putFile(
-        await file.getBytes(),
-        file.onProgress,
-      );
-      return new TextEncoder().encode(MOTOKO_DEDUPLICATION_SENTINEL + hash);
-    },
-    async (bytes) => {
-      const hashWithPrefix = new TextDecoder().decode(new Uint8Array(bytes));
-      const hash = hashWithPrefix.substring(
-        MOTOKO_DEDUPLICATION_SENTINEL.length,
-      );
-      const { ExternalBlob } = await import("@caffeineai/object-storage");
-      const url = await storageClient.getDirectURL(hash);
-      return ExternalBlob.fromURL(url);
-    },
-    { agent },
-  );
-
-  return { storageClient };
-}
+// ─── Core upload function ─────────────────────────────────────────────────────
 
 export type UploadProgress = (progress: number) => void;
 
-/**
- * Upload a File to object storage and return a permanent https:// URL.
- *
- * Requirements:
- * - Requires an authenticated Identity — throws if identity is not provided.
- * - Never returns blob: or data: URLs. Throws on any failure.
- * - A fresh agent + StorageClient is built for every upload to avoid stale
- *   delegation state (a cached agent with an expired or partially-initialised
- *   delegation causes the backend to reject the certificate, which the storage
- *   gateway reports as 403 Forbidden: Invalid payload).
- * - Both the StorageClient and the backend actor share the SAME HttpAgent
- *   instance so the certificate call and the upload use the same auth context.
- */
 export async function uploadFileToStorage(
   file: File,
   onProgress?: UploadProgress,
   identity?: Identity,
 ): Promise<string> {
+  // ── Step 1: Validate identity ─────────────────────────────────────────────
+
   if (!identity) {
+    console.error("[Upload] ✗ No identity provided — user is not logged in");
     throw new Error("Not authenticated — please log in to upload media.");
   }
 
-  // Always build a fresh client pair to ensure the identity delegation is current.
-  let clients: UploadClients;
-  try {
-    clients = await buildUploadClients(identity);
-  } catch (err) {
+  const principal = identity.getPrincipal();
+  const isAnonymous = principal.isAnonymous();
+  console.log(
+    `[Upload] Identity: principal=${principal.toText().slice(0, 12)}… anonymous=${isAnonymous}`,
+  );
+
+  if (isAnonymous) {
+    console.error(
+      "[Upload] ✗ Identity is anonymous — Internet Identity delegation not active",
+    );
     throw new Error(
-      `Failed to connect to storage: ${err instanceof Error ? err.message : String(err)}`,
+      "Upload requires a logged-in Internet Identity. Anonymous identity cannot upload files.",
     );
   }
 
-  let url: string;
+  // ── Step 2: Load config ───────────────────────────────────────────────────
+
+  let config: Awaited<ReturnType<typeof loadConfig>>;
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const { hash } = await clients.storageClient.putFile(bytes, onProgress);
-    url = await clients.storageClient.getDirectURL(hash);
+    config = await loadConfig();
+    console.log("[Upload] Config loaded:", {
+      backend_canister_id: config.backend_canister_id
+        ? `${config.backend_canister_id.slice(0, 10)}…`
+        : "MISSING",
+      storage_gateway_url: config.storage_gateway_url || "MISSING",
+      project_id: config.project_id
+        ? `${config.project_id.slice(0, 8)}…`
+        : "MISSING",
+      bucket_name: config.bucket_name || "MISSING",
+    });
   } catch (err) {
+    console.error("[Upload] ✗ Failed to load config:", err);
+    throw new Error(
+      `Storage not configured: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  if (
+    !config.backend_canister_id ||
+    config.backend_canister_id === "undefined"
+  ) {
+    console.error(
+      "[Upload] ✗ backend_canister_id is missing or 'undefined' — app not deployed or env.json not served",
+    );
+    throw new Error(
+      "Storage not configured — backend canister ID is missing. Please check deployment config.",
+    );
+  }
+
+  if (
+    !config.storage_gateway_url ||
+    config.storage_gateway_url === "nogateway"
+  ) {
+    console.error(
+      "[Upload] ✗ storage_gateway_url is missing or 'nogateway' — STORAGE_GATEWAY_URL env var not set at build time",
+    );
+    throw new Error(
+      "Storage gateway not configured — STORAGE_GATEWAY_URL was not set during deployment.",
+    );
+  }
+
+  // DEFAULT_PROJECT_ID sentinel from @caffeineai/core-infrastructure — used when no real
+  // project_id is available. The storage gateway rejects this placeholder with 403.
+  const BOGUS_PROJECT_ID = "0000000-0000-0000-0000-00000000000";
+  if (
+    !config.project_id ||
+    config.project_id === "undefined" ||
+    config.project_id === BOGUS_PROJECT_ID
+  ) {
+    console.error(
+      "[Upload] ✗ project_id is missing, 'undefined', or the default placeholder — storage gateway will reject with 403. " +
+        "Ensure CANISTER_ID_BACKEND or PROJECT_ID is set at build time.",
+    );
+    throw new Error(
+      "Storage not configured — project_id is missing or is a placeholder. Media uploads require a valid project ID injected at build time.",
+    );
+  }
+
+  console.log(
+    `[Upload] File: name="${file.name}" size=${file.size} bytes type="${file.type}"`,
+  );
+
+  // ── Step 3: Initialize upload client ─────────────────────────────────────
+
+  let capturedUploadFn: ((file: ExternalBlob) => Promise<Uint8Array>) | null =
+    null;
+
+  try {
+    console.log(
+      "[Upload] Initializing StorageClient via createActorWithConfig…",
+    );
+    await createActorWithConfig(
+      (canisterId, uploadFile, downloadFile, options) => {
+        capturedUploadFn = uploadFile;
+        console.log(
+          "[Upload] StorageClient.putFile captured. canisterId=",
+          typeof canisterId === "string"
+            ? `${canisterId.slice(0, 12)}…`
+            : `${String(canisterId).slice(0, 12)}…`,
+        );
+        return createActor(canisterId, uploadFile, downloadFile, options);
+      },
+      {
+        agentOptions: { identity },
+      },
+    );
+  } catch (err) {
+    console.error("[Upload] ✗ createActorWithConfig threw:", err);
+    throw new Error(
+      `Failed to initialize storage client: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  if (!capturedUploadFn) {
+    console.error(
+      "[Upload] ✗ capturedUploadFn is null after createActorWithConfig — factory did not call createActor",
+    );
+    throw new Error(
+      "Upload client initialization failed — upload callback was not captured.",
+    );
+  }
+
+  const uploadFn: (file: ExternalBlob) => Promise<Uint8Array> =
+    capturedUploadFn;
+
+  // ── Step 4: Build ExternalBlob and upload ─────────────────────────────────
+
+  let bytes: Uint8Array<ArrayBuffer>;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer()) as Uint8Array<ArrayBuffer>;
+    console.log(`[Upload] File bytes read: ${bytes.length} bytes`);
+  } catch (err) {
+    console.error("[Upload] ✗ Failed to read file bytes:", err);
+    throw new Error(
+      `Failed to read file: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  const blob = ExternalBlob.fromBytes(bytes);
+  if (onProgress) {
+    blob.withUploadProgress(onProgress);
+  }
+
+  console.log("[Upload] Calling StorageClient.putFile (certificate + upload)…");
+
+  let hashBytes: Uint8Array;
+  try {
+    hashBytes = new Uint8Array(await uploadFn(blob));
+    console.log(
+      "[Upload] putFile succeeded. hashBytes length:",
+      hashBytes.length,
+    );
+  } catch (err) {
+    // Log full details — this is where 403 manifests
     const message = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
+    console.error("[Upload] ✗ StorageClient.putFile threw:", {
+      message,
+      stack,
+      isV3ResponseBodyError: message.includes("Expected v3 response body"),
+      is403Error: message.includes("403"),
+      isForbiddenError:
+        message.toLowerCase().includes("forbidden") ||
+        message.toLowerCase().includes("invalid payload"),
+    });
     throw new Error(`Upload failed: ${message}`);
   }
 
-  // Validate that the returned URL is a persistent https:// URL, not a
-  // temporary blob: or data: URL that would break after the session ends.
-  if (!url.startsWith("https://")) {
+  // ── Step 5: Decode hash and build URL ─────────────────────────────────────
+
+  const hashWithPrefix = new TextDecoder().decode(hashBytes);
+  if (!hashWithPrefix.startsWith(MOTOKO_DEDUPLICATION_SENTINEL)) {
+    console.error(
+      "[Upload] ✗ Unexpected hash format (no sentinel prefix):",
+      JSON.stringify(hashWithPrefix.slice(0, 80)),
+    );
     throw new Error(
-      `Upload returned a temporary URL — storage upload likely failed. Got: ${url.slice(0, 60)}`,
+      "Upload returned an unexpected hash format — storage upload likely failed.",
     );
   }
 
+  const hash = hashWithPrefix.substring(MOTOKO_DEDUPLICATION_SENTINEL.length);
+  console.log("[Upload] Hash decoded:", `${hash.slice(0, 20)}…`);
+
+  const url = buildDirectURL(
+    config.storage_gateway_url,
+    hash,
+    config.backend_canister_id,
+    config.project_id,
+  );
+
+  if (!url.startsWith("https://")) {
+    console.error("[Upload] ✗ Built URL is not https:", url.slice(0, 80));
+    throw new Error(
+      `Upload returned a non-persistent URL — got: ${url.slice(0, 60)}`,
+    );
+  }
+
+  console.log("[Upload] ✓ Upload complete. URL:", `${url.slice(0, 80)}…`);
   return url;
 }
 
+// ─── React hook ───────────────────────────────────────────────────────────────
+
 /**
  * Hook that exposes an authenticated upload function.
- * Uses the Internet Identity from context so uploads are signed with the
- * user's identity. A fresh StorageClient + shared agent is created per
- * upload call to avoid stale agent/delegation issues.
+ *
+ * Uses createActorWithConfig (the platform's canonical actor factory) so the
+ * upload goes through the exact same agent/StorageClient initialization as all
+ * other backend calls. This ensures the certificate flow matches what the
+ * storage gateway expects.
  */
 export function useUploadFile() {
   const { identity } = useInternetIdentity();
@@ -149,7 +266,20 @@ export function useUploadFile() {
   const upload = useCallback(
     (file: File, onProgress?: UploadProgress): Promise<string> => {
       if (!identity) {
+        console.error(
+          "[useUploadFile] upload() called but identity is undefined — user not logged in",
+        );
         return Promise.reject(new Error("Please log in to upload media."));
+      }
+      if (identity.getPrincipal().isAnonymous()) {
+        console.error(
+          "[useUploadFile] upload() called with anonymous identity — II delegation not active",
+        );
+        return Promise.reject(
+          new Error(
+            "Please complete Internet Identity login before uploading media.",
+          ),
+        );
       }
       return uploadFileToStorage(file, onProgress, identity);
     },

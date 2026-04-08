@@ -1,3 +1,4 @@
+import Array "mo:core/Array";
 import List "mo:core/List";
 import Map "mo:core/Map";
 import Principal "mo:core/Principal";
@@ -68,7 +69,7 @@ actor {
   // Hash format: "sha256:<64 hex chars>" (stripped to 32 raw bytes for storage)
   //
   private func hexNibble(c : Char) : Nat8 {
-    let n = Nat32.toNat(Char.toNat32(c));
+    let n = c.toNat32().toNat();
     if (n >= 48 and n <= 57) {        // '0'..'9'
       Nat8.fromNat(n - 48)
     } else if (n >= 97 and n <= 102) { // 'a'..'f'
@@ -81,19 +82,14 @@ actor {
   };
 
   // Decode a hex string to a Blob of raw bytes.
+  // Each pair of hex characters produces one byte.
   private func hexDecode(hex : Text) : Blob {
-    let bytes = List.empty<Nat8>();
-    var hi : Nat8 = 0;
-    var pos = 0;
-    for (c in hex.chars()) {
-      if (pos % 2 == 0) {
-        hi := hexNibble(c);
-      } else {
-        bytes.add(hi * 16 + hexNibble(c));
-      };
-      pos += 1;
-    };
-    Blob.fromArray(bytes.toArray())
+    let chars = hex.toArray();
+    let len = chars.size() / 2;
+    let arr = Array.tabulate(len, func(i) {
+      hexNibble(chars[i * 2]) * 16 + hexNibble(chars[i * 2 + 1])
+    });
+    Blob.fromArray(arr)
   };
 
   // Strip a known text prefix from a string.
@@ -103,7 +99,7 @@ actor {
     var result = "";
     var i = 0;
     for (c in s.chars()) {
-      if (i >= pLen) result #= Char.toText(c);
+      if (i >= pLen) result #= c.toText();
       i += 1;
     };
     result
