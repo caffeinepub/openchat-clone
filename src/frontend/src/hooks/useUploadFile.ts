@@ -163,21 +163,32 @@ export async function uploadFileToStorage(
   // ── Step 3: Create a fresh authenticated HttpAgent ────────────────────────
   // A fresh agent per-upload prevents stale auth delegation issues.
 
+  // Normalise backend_host: treat empty string the same as undefined so
+  // HttpAgent uses its default IC boundary-node discovery rather than
+  // trying to connect to an empty-string host (which resolves to the
+  // current page origin on some runtimes and can cause cert/routing issues).
+  const backendHost =
+    config.backend_host && config.backend_host.trim() !== ""
+      ? config.backend_host
+      : undefined;
+
   let agent: HttpAgent;
   try {
     agent = new HttpAgent({
       identity,
-      host: config.backend_host,
+      ...(backendHost !== undefined ? { host: backendHost } : {}),
     });
 
     // Fetch root key for local dev only
-    if (config.backend_host?.includes("localhost")) {
+    if (backendHost?.includes("localhost")) {
       await agent.fetchRootKey().catch((err: unknown) => {
         console.warn("[Upload] Unable to fetch root key:", err);
       });
     }
 
-    console.log("[Upload] Fresh HttpAgent created with identity.");
+    console.log(
+      `[Upload] Fresh HttpAgent created with identity. host=${backendHost ?? "(default IC host)"}`,
+    );
   } catch (err) {
     console.error("[Upload] ✗ Failed to create HttpAgent:", err);
     throw new Error(

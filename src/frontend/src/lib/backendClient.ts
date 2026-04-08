@@ -84,14 +84,21 @@ export type {
 export async function getBackendClient(identity?: Identity): Promise<Backend> {
   const config = await loadConfig();
 
+  // Normalise backend_host: treat empty string same as undefined so HttpAgent
+  // uses its default IC boundary-node discovery instead of the current origin.
+  const backendHost =
+    config.backend_host && config.backend_host.trim() !== ""
+      ? config.backend_host
+      : undefined;
+
   // Build a fresh, authenticated HttpAgent. One agent serves both the Backend
   // actor (Candid calls) and the StorageClient (getCertificate → update call).
   const agent = new HttpAgent({
     identity: identity ?? undefined,
-    host: config.backend_host,
+    ...(backendHost !== undefined ? { host: backendHost } : {}),
   });
 
-  if (config.backend_host?.includes("localhost")) {
+  if (backendHost?.includes("localhost")) {
     await agent.fetchRootKey().catch((err: unknown) => {
       console.warn("[getBackendClient] Unable to fetch root key:", err);
     });
