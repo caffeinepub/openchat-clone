@@ -9,7 +9,9 @@
  *   - Backend (Principal / bigint) types  ↔  Frontend (string / number) types
  */
 
-import { createActorWithConfig } from "@caffeineai/core-infrastructure";
+import { loadConfig } from "@caffeineai/core-infrastructure";
+import { StorageClient } from "@caffeineai/object-storage";
+import { ExternalBlob } from "@caffeineai/object-storage";
 import { HttpAgent } from "@icp-sdk/core/agent";
 import type { Identity } from "@icp-sdk/core/agent";
 import { Principal } from "@icp-sdk/core/principal";
@@ -73,14 +75,60 @@ export type {
  * delegation — causing the backend (and the object-storage gateway) to reject
  * requests with a 403 "Invalid payload" error.
  *
- * Since uploads and most mutations don't happen at high frequency, the cost of
- * creating a fresh client per call is negligible and far outweighs the risk of
- * stale auth causing silent failures.
+ * We bypass createActorWithConfig to avoid the well-known "Detected both agent
+ * and agentOptions passed to createActor" warning. Instead, we build the
+ * HttpAgent ourselves with the identity attached, then pass ONLY `agent` (not
+ * `agentOptions`) to createActor. This eliminates the conflict and ensures the
+ * identity is always present for both actor calls and StorageClient uploads.
  */
-export function getBackendClient(identity?: Identity): Promise<Backend> {
-  return createActorWithConfig(createActor, {
-    agentOptions: identity ? { identity } : undefined,
-  }) as Promise<Backend>;
+export async function getBackendClient(identity?: Identity): Promise<Backend> {
+  const config = await loadConfig();
+
+  // Build a fresh, authenticated HttpAgent. One agent serves both the Backend
+  // actor (Candid calls) and the StorageClient (getCertificate → update call).
+  const agent = new HttpAgent({
+    identity: identity ?? undefined,
+    host: config.backend_host,
+  });
+
+  if (config.backend_host?.includes("localhost")) {
+    await agent.fetchRootKey().catch((err: unknown) => {
+      console.warn("[getBackendClient] Unable to fetch root key:", err);
+    });
+  }
+
+  // StorageClient is used by _uploadFile / _downloadFile callbacks inside the
+  // generated Backend class. It uses the same authenticated agent so certificate
+  // calls are made with the correct identity.
+  const storageClient = new StorageClient(
+    config.bucket_name,
+    config.storage_gateway_url,
+    config.backend_canister_id,
+    config.project_id,
+    agent,
+  );
+
+  const MOTOKO_DEDUPLICATION_SENTINEL = "!caf!";
+
+  const uploadFile = async (file: ExternalBlob): Promise<Uint8Array> => {
+    const { hash } = await storageClient.putFile(
+      await file.getBytes(),
+      file.onProgress,
+    );
+    return new TextEncoder().encode(MOTOKO_DEDUPLICATION_SENTINEL + hash);
+  };
+
+  const downloadFile = async (bytes: Uint8Array): Promise<ExternalBlob> => {
+    const hashWithPrefix = new TextDecoder().decode(new Uint8Array(bytes));
+    const hash = hashWithPrefix.substring(MOTOKO_DEDUPLICATION_SENTINEL.length);
+    const url = await storageClient.getDirectURL(hash);
+    return ExternalBlob.fromURL(url);
+  };
+
+  // Pass ONLY agent — no agentOptions — so createActor never sees both.
+  return createActor(config.backend_canister_id, uploadFile, downloadFile, {
+    agent,
+  });
 }
 
 /** No-op — kept for API compatibility. Cache was removed; nothing to clear. */

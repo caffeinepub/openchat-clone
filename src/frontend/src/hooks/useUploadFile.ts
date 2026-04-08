@@ -1,22 +1,16 @@
-import {
-  createActorWithConfig,
-  loadConfig,
-  useInternetIdentity,
-} from "@caffeineai/core-infrastructure";
-import { ExternalBlob } from "@caffeineai/object-storage";
+import { loadConfig } from "@caffeineai/core-infrastructure";
+import { useInternetIdentity } from "@caffeineai/core-infrastructure";
+import { StorageClient } from "@caffeineai/object-storage";
+import { HttpAgent } from "@icp-sdk/core/agent";
 import type { Identity } from "@icp-sdk/core/agent";
 import { useCallback } from "react";
-import { createActor } from "../backend";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MOTOKO_DEDUPLICATION_SENTINEL = "!caf!";
 const GATEWAY_VERSION = "v1";
+const DEFAULT_BUCKET_NAME = "default-bucket";
 
 // ─── URL construction helper ──────────────────────────────────────────────────
-//
-// Replicates StorageClient.getDirectURL() without needing a StorageClient instance.
-// The URL format is stable and defined by the storage gateway spec.
 
 function buildDirectURL(
   gatewayUrl: string,
@@ -30,6 +24,30 @@ function buildDirectURL(
     `&owner_id=${encodeURIComponent(backendCanisterId)}` +
     `&project_id=${encodeURIComponent(projectId)}`
   );
+}
+
+// ─── Extra env.json fields ────────────────────────────────────────────────────
+// loadConfig() from @caffeineai/core-infrastructure does not expose all fields
+// written to env.json (e.g. bucket_name). Read them here directly.
+
+interface EnvJsonExtras {
+  bucket_name?: string;
+}
+
+async function readEnvJsonExtras(): Promise<EnvJsonExtras> {
+  try {
+    const resp = await fetch("/env.json");
+    if (!resp.ok) return {};
+    const data = (await resp.json()) as Record<string, string>;
+    return {
+      bucket_name:
+        data.bucket_name && data.bucket_name !== "undefined"
+          ? data.bucket_name
+          : undefined,
+    };
+  } catch {
+    return {};
+  }
 }
 
 // ─── Core upload function ─────────────────────────────────────────────────────
@@ -66,8 +84,10 @@ export async function uploadFileToStorage(
   // ── Step 2: Load config ───────────────────────────────────────────────────
 
   let config: Awaited<ReturnType<typeof loadConfig>>;
+  let extras: EnvJsonExtras;
+
   try {
-    config = await loadConfig();
+    [config, extras] = await Promise.all([loadConfig(), readEnvJsonExtras()]);
     console.log("[Upload] Config loaded:", {
       backend_canister_id: config.backend_canister_id
         ? `${config.backend_canister_id.slice(0, 10)}…`
@@ -76,7 +96,7 @@ export async function uploadFileToStorage(
       project_id: config.project_id
         ? `${config.project_id.slice(0, 8)}…`
         : "MISSING",
-      bucket_name: config.bucket_name || "MISSING",
+      bucket_name: extras.bucket_name ?? config.bucket_name ?? "MISSING",
     });
   } catch (err) {
     console.error("[Upload] ✗ Failed to load config:", err);
@@ -109,71 +129,71 @@ export async function uploadFileToStorage(
     );
   }
 
-  // DEFAULT_PROJECT_ID sentinel from @caffeineai/core-infrastructure — used when no real
-  // project_id is available. The storage gateway rejects this placeholder with 403.
-  const BOGUS_PROJECT_ID = "0000000-0000-0000-0000-00000000000";
+  // Detect invalid/placeholder project_id values.
+  // Valid values are:
+  //   - A canister ID like "xxxxx-xxxxx-xxxxx-xxxxx-cai"  ← used when CANISTER_ID_BACKEND is the project_id
+  //   - A real UUID like "550e8400-e29b-41d4-a716-446655440000"
+  // Invalid values we must reject before constructing StorageClient:
+  const PLACEHOLDER_PATTERNS = [
+    "", // empty string
+    "undefined", // literal string written by getEnv() when env var is missing
+    "00000000-0000-0000-0000-000000000000", // standard all-zeros UUID
+    "0000000-0000-0000-0000-00000000000", // short all-zeros UUID (11 zeros / 35 chars)
+  ];
   if (
     !config.project_id ||
-    config.project_id === "undefined" ||
-    config.project_id === BOGUS_PROJECT_ID
+    PLACEHOLDER_PATTERNS.includes(config.project_id) ||
+    /^0+(-0+)*$/.test(config.project_id) // any all-zeros UUID variant
   ) {
     console.error(
-      "[Upload] ✗ project_id is missing, 'undefined', or the default placeholder — storage gateway will reject with 403. " +
-        "Ensure CANISTER_ID_BACKEND or PROJECT_ID is set at build time.",
+      "[Upload] ✗ project_id is missing, 'undefined', or a placeholder. " +
+        "Ensure CANISTER_ID_BACKEND is set at build time.",
     );
     throw new Error(
-      "Storage not configured — project_id is missing or is a placeholder. Media uploads require a valid project ID injected at build time.",
+      "Storage not configured — project_id is missing or is a placeholder.",
     );
   }
+
+  const bucketName = extras.bucket_name ?? DEFAULT_BUCKET_NAME;
 
   console.log(
     `[Upload] File: name="${file.name}" size=${file.size} bytes type="${file.type}"`,
   );
 
-  // ── Step 3: Initialize upload client ─────────────────────────────────────
+  // ── Step 3: Create a fresh authenticated HttpAgent ────────────────────────
+  // A fresh agent per-upload prevents stale auth delegation issues.
 
-  let capturedUploadFn: ((file: ExternalBlob) => Promise<Uint8Array>) | null =
-    null;
-
+  let agent: HttpAgent;
   try {
-    console.log(
-      "[Upload] Initializing StorageClient via createActorWithConfig…",
-    );
-    await createActorWithConfig(
-      (canisterId, uploadFile, downloadFile, options) => {
-        capturedUploadFn = uploadFile;
-        console.log(
-          "[Upload] StorageClient.putFile captured. canisterId=",
-          typeof canisterId === "string"
-            ? `${canisterId.slice(0, 12)}…`
-            : `${String(canisterId).slice(0, 12)}…`,
-        );
-        return createActor(canisterId, uploadFile, downloadFile, options);
-      },
-      {
-        agentOptions: { identity },
-      },
-    );
+    agent = new HttpAgent({
+      identity,
+      host: config.backend_host,
+    });
+
+    // Fetch root key for local dev only
+    if (config.backend_host?.includes("localhost")) {
+      await agent.fetchRootKey().catch((err: unknown) => {
+        console.warn("[Upload] Unable to fetch root key:", err);
+      });
+    }
+
+    console.log("[Upload] Fresh HttpAgent created with identity.");
   } catch (err) {
-    console.error("[Upload] ✗ createActorWithConfig threw:", err);
+    console.error("[Upload] ✗ Failed to create HttpAgent:", err);
     throw new Error(
-      `Failed to initialize storage client: ${err instanceof Error ? err.message : String(err)}`,
+      `Failed to create upload agent: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  if (!capturedUploadFn) {
-    console.error(
-      "[Upload] ✗ capturedUploadFn is null after createActorWithConfig — factory did not call createActor",
-    );
-    throw new Error(
-      "Upload client initialization failed — upload callback was not captured.",
-    );
-  }
-
-  const uploadFn: (file: ExternalBlob) => Promise<Uint8Array> =
-    capturedUploadFn;
-
-  // ── Step 4: Build ExternalBlob and upload ─────────────────────────────────
+  // ── Step 4: Create StorageClient and upload ───────────────────────────────
+  // StorageClient.putFile internally:
+  //   1. Computes the blob Merkle tree root hash
+  //   2. Calls getCertificate(hash) → calls _immutableObjectStorageCreateCertificate on backend
+  //   3. Gets IC certificate from v3 update call response
+  //   4. Sends blob tree + certificate to storage gateway
+  //   5. Uploads chunks in parallel
+  //
+  // This is the correct upload flow as defined by the Caffeine object-storage extension.
 
   let bytes: Uint8Array<ArrayBuffer>;
   try {
@@ -186,22 +206,30 @@ export async function uploadFileToStorage(
     );
   }
 
-  const blob = ExternalBlob.fromBytes(bytes);
-  if (onProgress) {
-    blob.withUploadProgress(onProgress);
-  }
+  const storageClient = new StorageClient(
+    bucketName,
+    config.storage_gateway_url,
+    config.backend_canister_id,
+    config.project_id,
+    agent,
+  );
 
-  console.log("[Upload] Calling StorageClient.putFile (certificate + upload)…");
+  console.log(
+    "[Upload] StorageClient created. Calling putFile (certificate + upload)…",
+    {
+      bucket: bucketName,
+      gateway: config.storage_gateway_url,
+      owner: `${config.backend_canister_id.slice(0, 12)}…`,
+      projectId: `${config.project_id.slice(0, 12)}…`,
+    },
+  );
 
-  let hashBytes: Uint8Array;
+  let hash: string;
   try {
-    hashBytes = new Uint8Array(await uploadFn(blob));
-    console.log(
-      "[Upload] putFile succeeded. hashBytes length:",
-      hashBytes.length,
-    );
+    const result = await storageClient.putFile(bytes, onProgress);
+    hash = result.hash;
+    console.log("[Upload] putFile succeeded. hash:", `${hash.slice(0, 30)}…`);
   } catch (err) {
-    // Log full details — this is where 403 manifests
     const message = err instanceof Error ? err.message : String(err);
     const stack = err instanceof Error ? err.stack : undefined;
     console.error("[Upload] ✗ StorageClient.putFile threw:", {
@@ -216,21 +244,7 @@ export async function uploadFileToStorage(
     throw new Error(`Upload failed: ${message}`);
   }
 
-  // ── Step 5: Decode hash and build URL ─────────────────────────────────────
-
-  const hashWithPrefix = new TextDecoder().decode(hashBytes);
-  if (!hashWithPrefix.startsWith(MOTOKO_DEDUPLICATION_SENTINEL)) {
-    console.error(
-      "[Upload] ✗ Unexpected hash format (no sentinel prefix):",
-      JSON.stringify(hashWithPrefix.slice(0, 80)),
-    );
-    throw new Error(
-      "Upload returned an unexpected hash format — storage upload likely failed.",
-    );
-  }
-
-  const hash = hashWithPrefix.substring(MOTOKO_DEDUPLICATION_SENTINEL.length);
-  console.log("[Upload] Hash decoded:", `${hash.slice(0, 20)}…`);
+  // ── Step 5: Build persistent URL ─────────────────────────────────────────
 
   const url = buildDirectURL(
     config.storage_gateway_url,
@@ -255,10 +269,8 @@ export async function uploadFileToStorage(
 /**
  * Hook that exposes an authenticated upload function.
  *
- * Uses createActorWithConfig (the platform's canonical actor factory) so the
- * upload goes through the exact same agent/StorageClient initialization as all
- * other backend calls. This ensures the certificate flow matches what the
- * storage gateway expects.
+ * Creates a fresh StorageClient per upload call with a fresh HttpAgent
+ * to prevent stale delegation state from causing 403 errors.
  */
 export function useUploadFile() {
   const { identity } = useInternetIdentity();

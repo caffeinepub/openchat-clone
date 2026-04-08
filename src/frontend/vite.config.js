@@ -42,11 +42,10 @@ function getEnv(key) {
  *   STORAGE_GATEWAY_URL   – storage gateway URL (https://blob.caffeine.ai)
  *   II_URL                – Internet Identity URL
  *   DFX_NETWORK           – "local" | "ic"
- *   PROJECT_ID            – Caffeine project UUID (primary source for project_id)
+ *   PROJECT_ID            – Caffeine project UUID (used as project_id for storage gateway)
  *
- * For project_id we use PROJECT_ID first, then fall back to CANISTER_ID_BACKEND.
- * The storage gateway ties uploads to a project and rejects requests where
- * project_id is the default placeholder "0000000-0000-0000-0000-00000000000".
+ * For project_id we use PROJECT_ID (UUID) first, falling back to CANISTER_ID_BACKEND.
+ * The object-storage gateway identifies tenants by project UUID — canister IDs are rejected.
  */
 function generateEnvJsonPlugin() {
   return {
@@ -60,15 +59,21 @@ function generateEnvJsonPlugin() {
       const iiUrl = getEnv("II_URL");
       const dfxNetwork = getEnv("DFX_NETWORK");
 
-      // project_id: use PROJECT_ID first, then CANISTER_ID_BACKEND, then "undefined"
-      // Writing "undefined" (the string) lets loadConfig() use its proper fallback mechanism.
-      const projectIdRaw = getEnv("PROJECT_ID");
+      // project_id: use PROJECT_ID (UUID assigned by Caffeine platform) as the primary value.
+      // The storage gateway identifies tenants by this UUID — it MUST match the platform UUID,
+      // not the canister ID. Fall back to CANISTER_ID_BACKEND only if PROJECT_ID is unset.
+      const projectIdFromEnv = getEnv("PROJECT_ID");
       const projectId =
-        projectIdRaw !== "undefined"
-          ? projectIdRaw
+        projectIdFromEnv !== "undefined"
+          ? projectIdFromEnv
           : backendCanisterId !== "undefined"
             ? backendCanisterId
             : "undefined";
+
+      // bucket_name: use BUCKET_NAME env var if set, otherwise default
+      const bucketNameRaw = getEnv("BUCKET_NAME");
+      const bucketName =
+        bucketNameRaw !== "undefined" ? bucketNameRaw : "default-bucket";
 
       // backend_host is only needed for local dev
       const dfxHost = getEnv("DFX_HOST");
@@ -83,6 +88,7 @@ function generateEnvJsonPlugin() {
         backend_host: backendHost,
         backend_canister_id: backendCanisterId,
         project_id: projectId,
+        bucket_name: bucketName,
         ii_derivation_origin: iiUrl,
         storage_gateway_url: storageGatewayUrl,
       };
@@ -96,6 +102,12 @@ function generateEnvJsonPlugin() {
       if (projectId === "undefined") {
         console.warn(
           "[generate-env-json] WARNING: project_id is empty (neither PROJECT_ID nor CANISTER_ID_BACKEND set) — media uploads will get 403",
+        );
+      }
+      if (projectIdFromEnv === "undefined") {
+        console.warn(
+          "[generate-env-json] WARNING: PROJECT_ID env var not set — falling back to CANISTER_ID_BACKEND as project_id. " +
+          "If uploads fail with 403, ensure PROJECT_ID is injected by the Caffeine platform.",
         );
       }
 
@@ -148,6 +160,8 @@ export default defineConfig({
     environment("all", { prefix: "DFX_" }),
     environment(["II_URL"]),
     environment(["STORAGE_GATEWAY_URL"]),
+    environment({ PROJECT_ID: "" }),
+    environment({ BUCKET_NAME: "" }),
     react(),
   ],
   resolve: {
