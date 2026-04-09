@@ -108,7 +108,7 @@ actor {
   /// Called by the frontend StorageClient before every upload.
   /// Stores the file hash in certified data; the IC attaches the certificate
   /// to the update-call response so the storage gateway can verify it.
-  public func _immutableObjectStorageCreateCertificate(hashWithPrefix : Text) : async () {
+  public shared func _immutableObjectStorageCreateCertificate(hashWithPrefix : Text) : async () {
     let hexPart = stripPrefix(hashWithPrefix, "sha256:");
     CertifiedData.set(hexDecode(hexPart));
   };
