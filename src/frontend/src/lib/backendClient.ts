@@ -64,6 +64,11 @@ export type {
   BEUserProfile,
 };
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+// Always point directly at the IC mainnet API — never route through CDN proxy.
+const IC_MAINNET_HOST = "https://icp-api.io";
+
 // ─── Client factory ───────────────────────────────────────────────────────────
 
 /**
@@ -84,21 +89,22 @@ export type {
 export async function getBackendClient(identity?: Identity): Promise<Backend> {
   const config = await loadConfig();
 
-  // Normalise backend_host: treat empty string same as undefined so HttpAgent
-  // uses its default IC boundary-node discovery instead of the current origin.
-  const backendHost =
-    config.backend_host && config.backend_host.trim() !== ""
-      ? config.backend_host
-      : undefined;
+  // For local dev: use the configured DFX host.
+  // For mainnet: always use icp-api.io directly, never the page origin.
+  const isLocalDev =
+    config.backend_host?.includes("localhost") ||
+    config.backend_host?.includes("127.0.0.1");
+  const agentHost = isLocalDev
+    ? (config.backend_host ?? "http://localhost:4943")
+    : IC_MAINNET_HOST;
 
-  // Build a fresh, authenticated HttpAgent. One agent serves both the Backend
-  // actor (Candid calls) and the StorageClient (getCertificate → update call).
-  const agent = new HttpAgent({
+  // Build a fresh, authenticated HttpAgent using the recommended createSync API.
+  const agent = HttpAgent.createSync({
     identity: identity ?? undefined,
-    ...(backendHost !== undefined ? { host: backendHost } : {}),
+    host: agentHost,
   });
 
-  if (backendHost?.includes("localhost")) {
+  if (isLocalDev) {
     await agent.fetchRootKey().catch((err: unknown) => {
       console.warn("[getBackendClient] Unable to fetch root key:", err);
     });

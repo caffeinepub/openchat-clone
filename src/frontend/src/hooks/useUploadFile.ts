@@ -7,8 +7,10 @@ import { useCallback } from "react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const GATEWAY_VERSION = "v1";
 const DEFAULT_BUCKET_NAME = "default-bucket";
+// Mainnet IC API endpoint — always explicit so we never accidentally
+// route through the CDN or page-origin proxy.
+const IC_MAINNET_HOST = "https://icp-api.io";
 
 // ─── URL construction helper ──────────────────────────────────────────────────
 
@@ -19,7 +21,7 @@ function buildDirectURL(
   projectId: string,
 ): string {
   return (
-    `${gatewayUrl}/${GATEWAY_VERSION}/blob/` +
+    `${gatewayUrl}/v1/blob/` +
     `?blob_hash=${encodeURIComponent(hash)}` +
     `&owner_id=${encodeURIComponent(backendCanisterId)}` +
     `&project_id=${encodeURIComponent(projectId)}`
@@ -27,8 +29,6 @@ function buildDirectURL(
 }
 
 // ─── Extra env.json fields ────────────────────────────────────────────────────
-// loadConfig() from @caffeineai/core-infrastructure does not expose all fields
-// written to env.json (e.g. bucket_name). Read them here directly.
 
 interface EnvJsonExtras {
   bucket_name?: string;
@@ -130,24 +130,20 @@ export async function uploadFileToStorage(
   }
 
   // Detect invalid/placeholder project_id values.
-  // Valid values are:
-  //   - A canister ID like "xxxxx-xxxxx-xxxxx-xxxxx-cai"  ← used when CANISTER_ID_BACKEND is the project_id
-  //   - A real UUID like "550e8400-e29b-41d4-a716-446655440000"
-  // Invalid values we must reject before constructing StorageClient:
   const PLACEHOLDER_PATTERNS = [
-    "", // empty string
-    "undefined", // literal string written by getEnv() when env var is missing
-    "00000000-0000-0000-0000-000000000000", // standard all-zeros UUID
-    "0000000-0000-0000-0000-00000000000", // short all-zeros UUID (11 zeros / 35 chars)
+    "",
+    "undefined",
+    "00000000-0000-0000-0000-000000000000",
+    "0000000-0000-0000-0000-00000000000",
   ];
   if (
     !config.project_id ||
     PLACEHOLDER_PATTERNS.includes(config.project_id) ||
-    /^0+(-0+)*$/.test(config.project_id) // any all-zeros UUID variant
+    /^0+(-0+)*$/.test(config.project_id)
   ) {
     console.error(
       "[Upload] ✗ project_id is missing, 'undefined', or a placeholder. " +
-        "Ensure CANISTER_ID_BACKEND is set at build time.",
+        "Ensure PROJECT_ID or CANISTER_ID_BACKEND is set at build time.",
     );
     throw new Error(
       "Storage not configured — project_id is missing or is a placeholder.",
@@ -155,40 +151,44 @@ export async function uploadFileToStorage(
   }
 
   const bucketName = extras.bucket_name ?? DEFAULT_BUCKET_NAME;
+  const gatewayUrl = config.storage_gateway_url;
 
   console.log(
     `[Upload] File: name="${file.name}" size=${file.size} bytes type="${file.type}"`,
   );
+  console.log(
+    `[Upload] project_id="${config.project_id}" owner="${config.backend_canister_id}" bucket="${bucketName}"`,
+  );
 
   // ── Step 3: Create a fresh authenticated HttpAgent ────────────────────────
-  // A fresh agent per-upload prevents stale auth delegation issues.
+  // Always use the explicit IC mainnet host (icp-api.io) or the configured
+  // backend_host for local dev. Never rely on window.location auto-detection
+  // which can route through the CDN proxy on deployed Caffeine apps.
 
-  // Normalise backend_host: treat empty string the same as undefined so
-  // HttpAgent uses its default IC boundary-node discovery rather than
-  // trying to connect to an empty-string host (which resolves to the
-  // current page origin on some runtimes and can cause cert/routing issues).
-  const backendHost =
-    config.backend_host && config.backend_host.trim() !== ""
-      ? config.backend_host
-      : undefined;
+  const isLocalDev =
+    config.backend_host?.includes("localhost") ||
+    config.backend_host?.includes("127.0.0.1");
+
+  // For local dev: use the configured DFX host.
+  // For mainnet: always use icp-api.io directly.
+  const agentHost = isLocalDev
+    ? (config.backend_host ?? "http://localhost:4943")
+    : IC_MAINNET_HOST;
 
   let agent: HttpAgent;
   try {
-    agent = new HttpAgent({
+    agent = HttpAgent.createSync({
       identity,
-      ...(backendHost !== undefined ? { host: backendHost } : {}),
+      host: agentHost,
     });
 
-    // Fetch root key for local dev only
-    if (backendHost?.includes("localhost")) {
+    if (isLocalDev) {
       await agent.fetchRootKey().catch((err: unknown) => {
         console.warn("[Upload] Unable to fetch root key:", err);
       });
     }
 
-    console.log(
-      `[Upload] Fresh HttpAgent created with identity. host=${backendHost ?? "(default IC host)"}`,
-    );
+    console.log(`[Upload] HttpAgent created with host=${agentHost}`);
   } catch (err) {
     console.error("[Upload] ✗ Failed to create HttpAgent:", err);
     throw new Error(
@@ -196,15 +196,7 @@ export async function uploadFileToStorage(
     );
   }
 
-  // ── Step 4: Create StorageClient and upload ───────────────────────────────
-  // StorageClient.putFile internally:
-  //   1. Computes the blob Merkle tree root hash
-  //   2. Calls getCertificate(hash) → calls _immutableObjectStorageCreateCertificate on backend
-  //   3. Gets IC certificate from v3 update call response
-  //   4. Sends blob tree + certificate to storage gateway
-  //   5. Uploads chunks in parallel
-  //
-  // This is the correct upload flow as defined by the Caffeine object-storage extension.
+  // ── Step 4: Read file bytes ───────────────────────────────────────────────
 
   let bytes: Uint8Array<ArrayBuffer>;
   try {
@@ -217,29 +209,35 @@ export async function uploadFileToStorage(
     );
   }
 
+  // ── Step 5: Create StorageClient and upload ───────────────────────────────
+  // StorageClient.putFile internally:
+  //   1. Builds blob Merkle tree and root hash
+  //   2. Calls getCertificate(hash) → agent.call(_immutableObjectStorageCreateCertificate)
+  //   3. Gets IC certificate from v3 update-call response body
+  //   4. Sends blob tree + certificate to storage gateway PUT /v1/blob-tree/
+  //   5. Uploads chunks in parallel
+
   const storageClient = new StorageClient(
     bucketName,
-    config.storage_gateway_url,
+    gatewayUrl,
     config.backend_canister_id,
     config.project_id,
     agent,
   );
 
-  console.log(
-    "[Upload] StorageClient created. Calling putFile (certificate + upload)…",
-    {
-      bucket: bucketName,
-      gateway: config.storage_gateway_url,
-      owner: `${config.backend_canister_id.slice(0, 12)}…`,
-      projectId: `${config.project_id.slice(0, 12)}…`,
-    },
-  );
+  console.log("[Upload] StorageClient created. Calling putFile…", {
+    bucket: bucketName,
+    gateway: gatewayUrl,
+    owner: `${config.backend_canister_id.slice(0, 12)}…`,
+    projectId: `${config.project_id.slice(0, 12)}…`,
+    host: agentHost,
+  });
 
   let hash: string;
   try {
     const result = await storageClient.putFile(bytes, onProgress);
     hash = result.hash;
-    console.log("[Upload] putFile succeeded. hash:", `${hash.slice(0, 30)}…`);
+    console.log("[Upload] ✓ putFile succeeded. hash:", `${hash.slice(0, 30)}…`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const stack = err instanceof Error ? err.stack : undefined;
@@ -255,10 +253,10 @@ export async function uploadFileToStorage(
     throw new Error(`Upload failed: ${message}`);
   }
 
-  // ── Step 5: Build persistent URL ─────────────────────────────────────────
+  // ── Step 6: Build persistent URL ─────────────────────────────────────────
 
   const url = buildDirectURL(
-    config.storage_gateway_url,
+    gatewayUrl,
     hash,
     config.backend_canister_id,
     config.project_id,
@@ -281,7 +279,7 @@ export async function uploadFileToStorage(
  * Hook that exposes an authenticated upload function.
  *
  * Creates a fresh StorageClient per upload call with a fresh HttpAgent
- * to prevent stale delegation state from causing 403 errors.
+ * explicitly pointed at the IC mainnet endpoint (icp-api.io).
  */
 export function useUploadFile() {
   const { identity } = useInternetIdentity();
